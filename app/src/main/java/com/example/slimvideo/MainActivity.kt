@@ -71,6 +71,8 @@ fun SlimVideoMainScreen(viewModel: MainViewModel = androidx.lifecycle.viewmodel.
     val progress by viewModel.compressionProgress.collectAsState()
     val state by viewModel.compressionState.collectAsState()
     val useH265 by viewModel.useH265.collectAsState()
+    val keepOriginalFps by viewModel.keepOriginalFps.collectAsState()
+    val defaultKeepFps by viewModel.defaultKeepFps.collectAsState()
     val theme by viewModel.currentTheme.collectAsState()
     val shouldPromptOverwrite by viewModel.shouldPromptOverwrite.collectAsState()
     val debugLogs by viewModel.debugLogs.collectAsState()
@@ -204,6 +206,8 @@ fun SlimVideoMainScreen(viewModel: MainViewModel = androidx.lifecycle.viewmodel.
                         theme = theme,
                         shouldPromptOverwrite = shouldPromptOverwrite,
                         onPromptOverwriteChange = { viewModel.setShouldPromptOverwrite(it) },
+                        defaultKeepFps = defaultKeepFps,
+                        onDefaultKeepFpsChange = { viewModel.setDefaultKeepFps(it) },
                         settingsLevel = settingsLevel,
                         onSettingsLevelChange = { settingsLevel = it },
                         onBackClick = {
@@ -272,6 +276,12 @@ fun SlimVideoMainScreen(viewModel: MainViewModel = androidx.lifecycle.viewmodel.
                                     onFormatSelected = { viewModel.setUseH265(it) }
                                 )
 
+                                FpsOptionSection(
+                                    keepOriginalFps = keepOriginalFps,
+                                    theme = theme,
+                                    onToggle = { viewModel.setKeepOriginalFps(it) }
+                                )
+
                                 Text(
                                     text = "⚙️ 选择瘦身档位 (情景标签化)",
                                     fontSize = 18.sp,
@@ -285,6 +295,7 @@ fun SlimVideoMainScreen(viewModel: MainViewModel = androidx.lifecycle.viewmodel.
                                         video = v,
                                         selectedPreset = preset,
                                         useH265 = useH265,
+                                        keepOriginalFps = keepOriginalFps,
                                         theme = theme,
                                         onPresetSelected = { viewModel.selectPreset(it) }
                                     )
@@ -423,6 +434,8 @@ fun SettingsScreen(
     theme: AppTheme,
     shouldPromptOverwrite: Boolean,
     onPromptOverwriteChange: (Boolean) -> Unit,
+    defaultKeepFps: Boolean,
+    onDefaultKeepFpsChange: (Boolean) -> Unit,
     settingsLevel: Int,
     onSettingsLevelChange: (Int) -> Unit,
     onBackClick: () -> Unit,
@@ -540,6 +553,62 @@ fun SettingsScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                             }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Default Frame Rate Settings Card
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = theme.surface),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, theme.border.copy(alpha = 0.3f))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "🎞️ 视频帧率默认配置",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = theme.textPrimary,
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onDefaultKeepFpsChange(!defaultKeepFps) }
+                                .padding(vertical = 12.dp, horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "默认保留原始视频帧率",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = theme.textPrimary
+                                )
+                                Text(
+                                    text = "开启时，导入视频将默认选择“保留原帧率”；关闭时，默认采用“智能降帧”以最大限度压缩文件体积。",
+                                    fontSize = 12.sp,
+                                    color = theme.textSecondary,
+                                    modifier = Modifier.padding(top = 4.dp, end = 8.dp)
+                                )
+                            }
+
+                            Switch(
+                                checked = defaultKeepFps,
+                                onCheckedChange = onDefaultKeepFpsChange,
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = theme.secondary,
+                                    uncheckedThumbColor = theme.textSecondary,
+                                    uncheckedTrackColor = theme.border.copy(alpha = 0.5f)
+                                )
+                            )
                         }
                     }
                 }
@@ -919,6 +988,9 @@ fun VideoMetadataCard(video: VideoItem, theme: AppTheme, onSelectAnother: () -> 
     val sizeText = String.format(Locale.getDefault(), "%.1f MB", sizeMb)
     val bitrateText = String.format(Locale.getDefault(), "%.1f Mbps", video.bitrate.toDouble() / 1_000_000)
 
+    val fpsText = if (video.fps % 1 == 0.0) "${video.fps.toInt()} fps" else String.format(Locale.getDefault(), "%.2f fps", video.fps)
+    val bitDepthText = "${video.bitDepth} bit"
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -968,8 +1040,9 @@ fun VideoMetadataCard(video: VideoItem, theme: AppTheme, onSelectAnother: () -> 
             modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
+        // 第一行：体积大小 | 播放时长 | 原始分辨率 | 视频码率
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
@@ -977,7 +1050,22 @@ fun VideoMetadataCard(video: VideoItem, theme: AppTheme, onSelectAnother: () -> 
             MetadataColumn("体积大小", sizeText, theme)
             MetadataColumn("播放时长", durationText, theme)
             MetadataColumn("原始分辨率", "${video.width} × ${video.height}", theme)
-            MetadataColumn("编码码率", bitrateText, theme)
+            MetadataColumn("视频码率", bitrateText, theme)
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+        Divider(color = theme.border.copy(alpha = 0.2f), thickness = 1.dp)
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // 第二行：帧率 | 视频编码 | 色彩位深 | 文件日期
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            MetadataColumn("帧率", fpsText, theme)
+            MetadataColumn("视频编码", video.codec, theme)
+            MetadataColumn("色彩位深", bitDepthText, theme)
+            MetadataColumn("文件日期", video.fileDate, theme)
         }
     }
 }
@@ -996,6 +1084,7 @@ fun PresetSelectionGrid(
     video: VideoItem,
     selectedPreset: CompressionPreset?,
     useH265: Boolean,
+    keepOriginalFps: Boolean,
     theme: AppTheme,
     onPresetSelected: (CompressionPreset) -> Unit
 ) {
@@ -1090,13 +1179,14 @@ fun PresetSelectionGrid(
                     if (eligible) {
                         val durationSec = video.durationMs / 1000
                         val estSize = preset.estimateSizeMb(durationSec, useH265)
+                        val displayFps = if (keepOriginalFps) video.fps.toInt() else preset.targetFps
                         Text(
                             text = String.format(
                                 Locale.getDefault(),
                                 "目标参数: %s / %dp / %dfps / %.1fMbps • 预估体积: %.1f MB",
                                 if (useH265) "H.265" else "H.264",
                                 preset.targetHeight,
-                                preset.targetFps,
+                                displayFps,
                                 preset.targetBitrateBps.toDouble() / 1_000_000,
                                 estSize
                             ),
@@ -1420,6 +1510,123 @@ fun FormatSelectionSection(
                     )
                     Text(
                         text = "通用 • 兼容度极高",
+                        fontSize = 10.sp,
+                        color = theme.textSecondary
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FpsOptionSection(
+    keepOriginalFps: Boolean,
+    theme: AppTheme,
+    onToggle: (Boolean) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 20.dp)
+    ) {
+        Text(
+            text = "🎞️ 帧率处理标准 (保留与降帧)",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = theme.textPrimary,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(theme.surface.copy(alpha = 0.6f))
+                .border(1.dp, theme.border.copy(alpha = 0.2f), RoundedCornerShape(14.dp))
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // 选项：智能降帧 (默认)
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (!keepOriginalFps) theme.primary.copy(alpha = if (theme.isDark) 0.3f else 0.15f)
+                        else Color.Transparent
+                    )
+                    .border(
+                        1.dp,
+                        if (!keepOriginalFps) theme.primary else Color.Transparent,
+                        RoundedCornerShape(10.dp)
+                    )
+                    .clickable { onToggle(false) }
+                    .padding(vertical = 12.dp, horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                RadioButton(
+                    selected = !keepOriginalFps,
+                    onClick = { onToggle(false) },
+                    colors = RadioButtonDefaults.colors(
+                        selectedColor = theme.secondary,
+                        unselectedColor = theme.textSecondary.copy(alpha = 0.7f)
+                    )
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Column {
+                    Text(
+                        text = "智能降帧",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = theme.textPrimary
+                    )
+                    Text(
+                        text = "省空间 • 推荐",
+                        fontSize = 10.sp,
+                        color = theme.secondary
+                    )
+                }
+            }
+
+            // 选项：保留原帧率
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (keepOriginalFps) theme.primary.copy(alpha = if (theme.isDark) 0.3f else 0.15f)
+                        else Color.Transparent
+                    )
+                    .border(
+                        1.dp,
+                        if (keepOriginalFps) theme.primary else Color.Transparent,
+                        RoundedCornerShape(10.dp)
+                    )
+                    .clickable { onToggle(true) }
+                    .padding(vertical = 12.dp, horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                RadioButton(
+                    selected = keepOriginalFps,
+                    onClick = { onToggle(true) },
+                    colors = RadioButtonDefaults.colors(
+                        selectedColor = theme.secondary,
+                        unselectedColor = theme.textSecondary.copy(alpha = 0.7f)
+                    )
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Column {
+                    Text(
+                        text = "保留原帧率",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = theme.textPrimary
+                    )
+                    Text(
+                        text = "极度丝滑",
                         fontSize = 10.sp,
                         color = theme.textSecondary
                     )

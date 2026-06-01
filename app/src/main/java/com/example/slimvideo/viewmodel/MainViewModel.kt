@@ -73,6 +73,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _shouldPromptOverwrite = MutableStateFlow(true)
     val shouldPromptOverwrite: StateFlow<Boolean> = _shouldPromptOverwrite.asStateFlow()
 
+    private val _defaultKeepFps = MutableStateFlow(false)
+    val defaultKeepFps: StateFlow<Boolean> = _defaultKeepFps.asStateFlow()
+
+    private val _keepOriginalFps = MutableStateFlow(false)
+    val keepOriginalFps: StateFlow<Boolean> = _keepOriginalFps.asStateFlow()
+
     private val _debugLogs = MutableStateFlow<List<String>>(emptyList())
     val debugLogs: StateFlow<List<String>> = _debugLogs.asStateFlow()
 
@@ -109,6 +115,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val savedOverwritePrompt = sharedPreferences.getBoolean("should_prompt_overwrite", true)
         _shouldPromptOverwrite.value = savedOverwritePrompt
+
+        val savedDefaultKeepFps = sharedPreferences.getBoolean("default_keep_fps", false)
+        _defaultKeepFps.value = savedDefaultKeepFps
+        _keepOriginalFps.value = savedDefaultKeepFps
     }
 
     fun setTheme(theme: AppTheme) {
@@ -119,6 +129,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setShouldPromptOverwrite(value: Boolean) {
         _shouldPromptOverwrite.value = value
         sharedPreferences.edit().putBoolean("should_prompt_overwrite", value).apply()
+    }
+
+    fun setDefaultKeepFps(value: Boolean) {
+        _defaultKeepFps.value = value
+        sharedPreferences.edit().putBoolean("default_keep_fps", value).apply()
+    }
+
+    fun setKeepOriginalFps(value: Boolean) {
+        _keepOriginalFps.value = value
     }
 
     fun setUseH265(value: Boolean) {
@@ -209,6 +228,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     
                     retriever.release()
                     logDebug("元数据解析完毕 - 时长: $durationMs ms, 宽: $width, 高: $height, 码率: $bitrate bps")
+
+                    // 2.1 Advanced metadata extraction using MediaExtractor
+                    var fps = 0.0
+                    var codec = "未知"
+                    var bitDepth = 8
+
+                    val extractor = android.media.MediaExtractor()
+                    try {
+                        extractor.setDataSource(context, uri, null)
+                        val trackCount = extractor.trackCount
+                        for (i in 0 until trackCount) {
+                            val format = extractor.getTrackFormat(i)
+                            val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                            if (mime.startsWith("video/")) {
+                                if (format.containsKey(android.media.MediaFormat.KEY_FRAME_RATE)) {
+                                    fps = try {
+                                        format.getFloat(android.media.MediaFormat.KEY_FRAME_RATE).toDouble()
+                                    } catch (e: Exception) {
+                                        format.getInteger(android.media.MediaFormat.KEY_FRAME_RATE).toDouble()
+                                    }
+                                }
+                                codec = when {
+                                    mime.contains("hevc") || mime.contains("h265") -> "H.265"
+                                    mime.contains("avc") || mime.contains("h264") -> "H.264"
+                                    mime.contains("vp9") -> "VP9"
+                                    mime.contains("vp8") -> "VP8"
+                                    mime.contains("av01") || mime.contains("av1") -> "AV1"
+                                    else -> mime.substringAfter("video/").uppercase()
+                                }
+                                if (format.containsKey(android.media.MediaFormat.KEY_PROFILE)) {
+                                    val profile = format.getInteger(android.media.MediaFormat.KEY_PROFILE)
+                                    if (mime.contains("hevc") && (profile == 2 || profile == 4096 || profile == 8192)) {
+                                        bitDepth = 10
+                                    } else if (mime.contains("avc") && profile == 2048) {
+                                        bitDepth = 10
+                                    } else if (mime.contains("vp9") && (profile == 4096 || profile == 8192)) {
+                                        bitDepth = 10
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        logDebug("MediaExtractor 提取高级属性失败: ${e.message}")
+                    } finally {
+                        try {
+                            extractor.release()
+                        } catch (e: Exception) { /* ignore */ }
+                    }
+
+                    // Fallback FPS calculation
+                    if (fps <= 0.0) {
+                        try {
+                            val ret = MediaMetadataRetriever()
+                            ret.setDataSource(context, uri)
+                            val frameCount = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
+                            } else 0
+                            if (frameCount > 0 && durationMs > 0) {
+                                fps = frameCount.toDouble() / (durationMs / 1000.0)
+                            }
+                            ret.release()
+                        } catch (e: Exception) { /* ignore */ }
+                    }
+                    if (fps <= 0.0) fps = 30.0
+                    logDebug("高级属性提取完毕 - 帧率: $fps fps, 编码: $codec, 位深: $bitDepth bit")
 
                     // If bitrate is missing, calcul                    // 3. Try to resolve the real physical path and real filename by mapping Picker/Document URI to standard MediaStore URI and applying multiple fallback strategies
                     var absolutePath: String? = null
@@ -430,9 +514,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         displayName = realDisplayName!!
                     }
 
+                    // Extract file date using robust fallback-driven timestamp query
+                    var fileTimestamp = 0L
+                    
+                    // 1. Try absolutePath first
+                    if (!absolutePath.isNullOrEmpty()) {
+                        try {
+                            val file = java.io.File(absolutePath!!)
+                            if (file.exists()) {
+                                fileTimestamp = file.lastModified()
+                                logDebug("文件日期提取 - 通过绝对路径提取成功: $fileTimestamp")
+                            }
+                        } catch (e: Exception) {
+                            logDebug("文件日期提取 - 绝对路径读取异常: ${e.message}")
+                        }
+                    }
+                    
+                    // 2. Fallback to MediaStore query using standard MediaStore columns
+                    if (fileTimestamp <= 0L) {
+                        try {
+                            val projection = arrayOf(MediaStore.Video.Media.DATE_MODIFIED)
+                            resolver.query(uri, projection, null, null, null)?.use { cursor ->
+                                if (cursor.moveToFirst()) {
+                                    val dateIdx = cursor.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
+                                    if (dateIdx != -1) {
+                                        // DATE_MODIFIED is in seconds, convert to milliseconds
+                                        fileTimestamp = cursor.getLong(dateIdx) * 1000L
+                                        logDebug("文件日期提取 - 通过 MediaStore DATE_MODIFIED 提取成功: $fileTimestamp")
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            logDebug("文件日期提取 - MediaStore 读取异常: ${e.message}")
+                        }
+                    }
+                    
+                    // 3. Fallback to current system time
+                    if (fileTimestamp <= 0L) {
+                        fileTimestamp = System.currentTimeMillis()
+                        logDebug("文件日期提取 - 采用当前系统时间兜底: $fileTimestamp")
+                    }
+                    
+                    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+                    val fileDate = sdf.format(java.util.Date(fileTimestamp))
+
                     logDebug("==== 诊断解析完毕 ====")
-                    logDebug("决议路径 (Path): ${absolutePath ?: "【未能获取真实路径，回退到虚拟路径】"}")
+                    logDebug("决议路径 (Path): ${absolutePath ?: "【未能获取真实路径，回退 to 虚拟路径】"}")
                     logDebug("决议名称 (Name): $displayName")
+                    logDebug("决议日期 (Date): $fileDate")
 
                     VideoItem(
                         uri = uri, // Keep original Picker URI for WorkManager permission compatibility!
@@ -442,7 +571,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         width = width,
                         height = height,
                         bitrate = bitrate,
-                        path = absolutePath
+                        path = absolutePath,
+                        fps = fps,
+                        codec = codec,
+                        bitDepth = bitDepth,
+                        fileDate = fileDate
                     )
                 } catch (e: Exception) {
                     logDebug("诊断解析捕获严重异常: ${e.message}")
@@ -453,6 +586,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             if (videoItem != null) {
                 _selectedVideo.value = videoItem
+                _keepOriginalFps.value = _defaultKeepFps.value
                 // Default to DAILY_HD if eligible, otherwise fallback to the first eligible preset
                 if (CompressionPreset.DAILY_HD.isEligible(videoItem.width, videoItem.height, videoItem.bitrate)) {
                     _selectedPreset.value = CompressionPreset.DAILY_HD
@@ -489,6 +623,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .putString(VideoCompressionWorker.KEY_VIDEO_URI, video.uri.toString())
             .putString(VideoCompressionWorker.KEY_PRESET_ID, preset.id)
             .putBoolean(VideoCompressionWorker.KEY_USE_H265, _useH265.value)
+            .putBoolean(VideoCompressionWorker.KEY_KEEP_ORIGINAL_FPS, _keepOriginalFps.value)
             .build()
 
         val compressionWork = OneTimeWorkRequestBuilder<VideoCompressionWorker>()

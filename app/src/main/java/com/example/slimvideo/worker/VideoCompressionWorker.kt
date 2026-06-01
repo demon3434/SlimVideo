@@ -9,6 +9,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Presentation
+import androidx.media3.effect.FrameDropEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
@@ -43,6 +44,7 @@ class VideoCompressionWorker(
         const val KEY_VIDEO_URI = "INPUT_VIDEO_URI"
         const val KEY_PRESET_ID = "INPUT_PRESET_ID"
         const val KEY_USE_H265 = "INPUT_USE_H265"
+        const val KEY_KEEP_ORIGINAL_FPS = "INPUT_KEEP_ORIGINAL_FPS"
         const val KEY_OUTPUT_PATH = "OUTPUT_PATH"
         const val KEY_ERROR_MSG = "ERROR_MSG"
         const val KEY_PROGRESS = "PROGRESS"
@@ -57,6 +59,7 @@ class VideoCompressionWorker(
             workDataOf(KEY_ERROR_MSG to "Missing preset ID input")
         )
         val useH265 = inputData.getBoolean(KEY_USE_H265, true)
+        val keepOriginalFps = inputData.getBoolean(KEY_KEEP_ORIGINAL_FPS, false)
 
         val uri = Uri.parse(videoUriStr)
         val preset = try {
@@ -68,6 +71,7 @@ class VideoCompressionWorker(
         // Detect video display dimensions and orientation to prevent transcode aspect ratio distortion
         var originalDisplayWidth = 0
         var originalDisplayHeight = 0
+        var originalFps = 30
         val retriever = android.media.MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, uri)
@@ -82,7 +86,22 @@ class VideoCompressionWorker(
                 originalDisplayWidth = width
                 originalDisplayHeight = height
             }
-            android.util.Log.d("VideoCompressionWorker", "Metadata parsed - display width: $originalDisplayWidth, display height: $originalDisplayHeight, rotation: $rotation")
+
+            val fpsStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
+            if (!fpsStr.isNullOrEmpty()) {
+                originalFps = fpsStr.toFloat().toInt()
+            } else {
+                val frameCount = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
+                } else 0
+                val durationMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                if (frameCount > 0 && durationMs > 0) {
+                    originalFps = (frameCount.toDouble() / (durationMs / 1000.0)).toInt()
+                }
+            }
+            if (originalFps <= 0) originalFps = 30
+
+            android.util.Log.d("VideoCompressionWorker", "Metadata parsed - display width: $originalDisplayWidth, display height: $originalDisplayHeight, rotation: $rotation, originalFps: $originalFps")
         } catch (e: Exception) {
             android.util.Log.e("VideoCompressionWorker", "Failed to retrieve video metadata", e)
         } finally {
@@ -164,9 +183,13 @@ class VideoCompressionWorker(
                             finalHeight,
                             Presentation.LAYOUT_SCALE_TO_FIT
                         )
+                        val videoEffects = mutableListOf<androidx.media3.common.Effect>(presentation)
+                        if (!keepOriginalFps) {
+                            videoEffects.add(FrameDropEffect.createDefaultFrameDropEffect(preset.targetFps.toFloat()))
+                        }
                         val effects = Effects(
                             emptyList(), // No audio effects
-                            listOf(presentation) // Apply scaling presentation
+                            videoEffects
                         )
                         EditedMediaItem.Builder(MediaItem.fromUri(uri))
                             .setEffects(effects)
