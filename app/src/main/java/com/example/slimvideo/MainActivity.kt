@@ -39,6 +39,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -1308,6 +1311,20 @@ fun ActionSection(
         }
         is CompressionState.Completed -> {
             val savedPath = state.savedPath
+            val origSizeMb = state.originalSize.toDouble() / (1024 * 1024)
+            val newSizeMb = state.size.toDouble() / (1024 * 1024)
+            val savedSizeMb = origSizeMb - newSizeMb
+            
+            val origSizeText = String.format(Locale.getDefault(), "%.1f MB", origSizeMb)
+            val newSizeText = String.format(Locale.getDefault(), "%.1f MB", newSizeMb)
+            val savedSizeText = String.format(Locale.getDefault(), "%.1f MB", savedSizeMb)
+
+            val savingsPercent = if (state.originalSize > 0) {
+                ((state.originalSize - state.size).toDouble() / state.originalSize.toDouble()) * 100
+            } else 0.0
+            val savingsPercentText = String.format(Locale.getDefault(), "%.1f%%", savingsPercent)
+            val newFpsText = if (state.fps % 1 == 0.0) "${state.fps.toInt()} fps" else String.format(Locale.getDefault(), "%.2f fps", state.fps)
+
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1323,12 +1340,64 @@ fun ActionSection(
                     fontWeight = FontWeight.Black,
                     color = theme.secondary
                 )
+                
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Outstanding outstanding visual text banner showcasing compression results in a single row
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(theme.surface.copy(alpha = 0.8f))
+                        .border(1.dp, theme.secondary.copy(alpha = 0.3f), RoundedCornerShape(14.dp))
+                        .padding(vertical = 12.dp, horizontal = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = buildAnnotatedString {
+                            append(origSizeText)
+                            append(" → ")
+                            withStyle(SpanStyle(color = theme.secondary, fontWeight = FontWeight.Black)) {
+                                append(newSizeText)
+                            }
+                            append("，文件减小了 ")
+                            withStyle(SpanStyle(color = theme.secondary, fontWeight = FontWeight.Black)) {
+                                append(savedSizeText)
+                            }
+                        },
+                        fontSize = 13.sp,
+                        color = theme.textPrimary,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                
+                // Horizontal details panel for compressed video metrics
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(theme.surface.copy(alpha = 0.5f))
+                        .padding(vertical = 10.dp, horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceAround,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MetadataResultColumn("体积缩减", savingsPercentText, theme)
+                    MetadataResultColumn("分辨率", "${state.width} × ${state.height}", theme)
+                    MetadataResultColumn("最终帧率", newFpsText, theme)
+                    MetadataResultColumn("视频编码", state.codec, theme)
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
                 Text(
                     text = "原视频已被瘦身版原位同名覆盖，相册已同步刷新。已为您释放大量手机空间！",
                     fontSize = 13.sp,
                     color = theme.textPrimary,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(vertical = 10.dp)
+                    modifier = Modifier.padding(vertical = 6.dp)
                 )
                 Text(
                     text = "保存完整路径:\n$savedPath",
@@ -1633,5 +1702,14 @@ fun FpsOptionSection(
                 }
             }
         }
+    }
+}
+
+@Composable
+fun MetadataResultColumn(label: String, value: String, theme: AppTheme) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(text = label, color = theme.textSecondary.copy(alpha = 0.8f), fontSize = 10.sp)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(text = value, color = theme.secondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
     }
 }

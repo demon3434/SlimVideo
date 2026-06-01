@@ -41,7 +41,15 @@ sealed class CompressionState {
     object AwaitingOverwriteConfirmation : CompressionState()
     data class AwaitingUserPermission(val intentSender: IntentSender) : CompressionState()
     object Replacing : CompressionState()
-    data class Completed(val savedPath: String) : CompressionState()
+    data class Completed(
+        val savedPath: String,
+        val originalSize: Long,
+        val size: Long,
+        val width: Int,
+        val height: Int,
+        val fps: Double,
+        val codec: String
+    ) : CompressionState()
     data class Failed(val error: String) : CompressionState()
 }
 
@@ -781,6 +789,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var success = false
             var errorMsg = "未知错误"
 
+            // Pre-extract target video details from local tempFile before any branch operations
+            var finalSize = tempFile.length()
+            var finalWidth = 0
+            var finalHeight = 0
+            var finalFps = 30.0
+            var finalCodec = "未知"
+
+            val ret = MediaMetadataRetriever()
+            try {
+                ret.setDataSource(tempFile.absolutePath)
+                finalWidth = ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                finalHeight = ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val frameCount = ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
+                    val durationMs = ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    if (frameCount > 0 && durationMs > 0) {
+                        finalFps = frameCount.toDouble() / (durationMs / 1000.0)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Pre-retrieving output details failed", e)
+            } finally {
+                try { ret.release() } catch (e: Exception) {}
+            }
+
+            val ext = android.media.MediaExtractor()
+            try {
+                ext.setDataSource(tempFile.absolutePath)
+                for (i in 0 until ext.trackCount) {
+                    val format = ext.getTrackFormat(i)
+                    val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                    if (mime.startsWith("video/")) {
+                        finalCodec = when {
+                            mime.contains("hevc") || mime.contains("h265") -> "H.265"
+                            mime.contains("avc") || mime.contains("h264") -> "H.264"
+                            mime.contains("vp9") -> "VP9"
+                            else -> mime.substringAfter("video/").uppercase()
+                        }
+                        if (format.containsKey(android.media.MediaFormat.KEY_FRAME_RATE)) {
+                            finalFps = try {
+                                format.getFloat(android.media.MediaFormat.KEY_FRAME_RATE).toDouble()
+                            } catch (e: Exception) {
+                                format.getInteger(android.media.MediaFormat.KEY_FRAME_RATE).toDouble()
+                            }
+                        }
+                        break
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Pre-extracting output details failed", e)
+            } finally {
+                try { ext.release() } catch (e: Exception) {}
+            }
+
             // Try 1: Atomic File Path Rename if the app has direct write access (highly compatible on legacy/legacy storage configs)
             if (originalPath != null) {
                 try {
@@ -862,7 +924,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 
                 withContext(Dispatchers.Main) {
-                    _compressionState.value = CompressionState.Completed(originalPath ?: video.displayName)
+                    _compressionState.value = CompressionState.Completed(
+                        savedPath = originalPath ?: video.displayName,
+                        originalSize = video.size,
+                        size = finalSize,
+                        width = finalWidth,
+                        height = finalHeight,
+                        fps = finalFps,
+                        codec = finalCodec
+                    )
                     _selectedVideo.value = null
                     _selectedPreset.value = null
                 }
