@@ -69,11 +69,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _compressionProgress = MutableStateFlow(0)
     val compressionProgress: StateFlow<Int> = _compressionProgress.asStateFlow()
 
+    private val _compressionStatusText = MutableStateFlow("正在准备转码任务...")
+    val compressionStatusText: StateFlow<String> = _compressionStatusText.asStateFlow()
+
     private val _compressionState = MutableStateFlow<CompressionState>(CompressionState.Idle)
     val compressionState: StateFlow<CompressionState> = _compressionState.asStateFlow()
 
     private val _compressedVideoSize = MutableStateFlow(0L)
     val compressedVideoSize: StateFlow<Long> = _compressedVideoSize.asStateFlow()
+
+    private var lastLoggedStep = ""
+    private var lastLoggedProgressMilestone = -1
+    private var currentWorkId: UUID? = null
+    private var tempOutputPath: String? = null
 
     private val _currentTheme = MutableStateFlow(AppTheme.TECH_BLUE)
     val currentTheme: StateFlow<AppTheme> = _currentTheme.asStateFlow()
@@ -90,6 +98,74 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _debugLogs = MutableStateFlow<List<String>>(emptyList())
     val debugLogs: StateFlow<List<String>> = _debugLogs.asStateFlow()
 
+    private val _tempFilesSize = MutableStateFlow(0L)
+    val tempFilesSize: StateFlow<Long> = _tempFilesSize.asStateFlow()
+
+    init {
+        val savedThemeId = sharedPreferences.getString("selected_theme_id", AppTheme.TECH_BLUE.name)
+        val matchedTheme = AppTheme.values().firstOrNull { it.name == savedThemeId } ?: AppTheme.TECH_BLUE
+        _currentTheme.value = matchedTheme
+
+        val savedOverwritePrompt = sharedPreferences.getBoolean("should_prompt_overwrite", true)
+        _shouldPromptOverwrite.value = savedOverwritePrompt
+
+        val savedDefaultKeepFps = sharedPreferences.getBoolean("default_keep_fps", false)
+        _defaultKeepFps.value = savedDefaultKeepFps
+        _keepOriginalFps.value = savedDefaultKeepFps
+
+        // Restore active task state if it was interrupted/completed in background
+        val hasActiveTask = sharedPreferences.getBoolean("active_task_exists", false)
+        if (hasActiveTask) {
+            val uriStr = sharedPreferences.getString("active_video_uri", null)
+            val name = sharedPreferences.getString("active_video_name", null)
+            val tempPath = sharedPreferences.getString("active_temp_output_path", null)
+            if (uriStr != null && name != null) {
+                val videoItem = VideoItem(
+                    uri = Uri.parse(uriStr),
+                    displayName = name,
+                    size = sharedPreferences.getLong("active_video_size", 0L),
+                    durationMs = sharedPreferences.getLong("active_video_duration", 0L),
+                    width = sharedPreferences.getInt("active_video_width", 0),
+                    height = sharedPreferences.getInt("active_video_height", 0),
+                    bitrate = sharedPreferences.getLong("active_video_bitrate", 0L),
+                    path = sharedPreferences.getString("active_video_path", null),
+                    fps = sharedPreferences.getFloat("active_video_fps", 30.0f).toDouble(),
+                    codec = sharedPreferences.getString("active_video_codec", "H.264") ?: "H.264",
+                    bitDepth = sharedPreferences.getInt("active_video_bitdepth", 8),
+                    fileDate = sharedPreferences.getString("active_video_filedate", "") ?: ""
+                )
+                _selectedVideo.value = videoItem
+                tempOutputPath = tempPath
+                
+                if (tempPath != null) {
+                    val file = File(tempPath)
+                    if (file.exists()) {
+                        _compressedVideoSize.value = file.length()
+                        _compressionState.value = CompressionState.AwaitingOverwriteConfirmation
+                        logDebug("检测到后台转码任务已成功完成，自动恢复覆盖提示框。")
+                    }
+                }
+            }
+        }
+
+        val savedWorkIdStr = sharedPreferences.getString("active_work_id", null)
+        if (savedWorkIdStr != null) {
+            try {
+                val workId = java.util.UUID.fromString(savedWorkIdStr)
+                currentWorkId = workId
+                observeWorkById(workId)
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+
+        // Clean up historical cache files in background
+        viewModelScope.launch(Dispatchers.IO) {
+            com.example.slimvideo.utils.FileStorageManager.cleanTempFiles(application)
+            calculateTempFilesSize()
+        }
+    }
+
     fun logDebug(msg: String) {
         val timestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date())
         val formatted = "[$timestamp] $msg"
@@ -103,30 +179,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _debugLogs.value = emptyList()
     }
 
-    private fun isVirtualPath(path: String?): Boolean {
-        if (path.isNullOrEmpty()) return true
-        return path.contains(".transforms", ignoreCase = true) || 
-               path.contains("synthetic", ignoreCase = true) || 
-               path.contains("/picker/", ignoreCase = true)
+    fun calculateTempFilesSize() {
+        viewModelScope.launch(Dispatchers.IO) {
+            var size = 0L
+            try {
+                val cacheDir = getApplication<Application>().cacheDir
+                val tempFiles = cacheDir.listFiles { _, name ->
+                    (name.startsWith("temp_compressed_") || name.startsWith("temp_chunk_")) && name.endsWith(".mp4")
+                }
+                tempFiles?.forEach { file ->
+                    if (file.exists()) {
+                        size += file.length()
+                    }
+                }
+            } catch (e: java.lang.Exception) {
+                Log.e("MainViewModel", "Error calculating cache size", e)
+            }
+            withContext(Dispatchers.Main) {
+                _tempFilesSize.value = size
+            }
+        }
     }
 
-    private fun isVirtualName(name: String?): Boolean {
-        if (name.isNullOrEmpty()) return true
-        val nameWithoutExt = name.substringBeforeLast(".")
-        return nameWithoutExt.all { it.isDigit() } || nameWithoutExt.contains("picker", ignoreCase = true)
-    }
-
-    init {
-        val savedThemeId = sharedPreferences.getString("selected_theme_id", AppTheme.TECH_BLUE.name)
-        val matchedTheme = AppTheme.values().firstOrNull { it.name == savedThemeId } ?: AppTheme.TECH_BLUE
-        _currentTheme.value = matchedTheme
-
-        val savedOverwritePrompt = sharedPreferences.getBoolean("should_prompt_overwrite", true)
-        _shouldPromptOverwrite.value = savedOverwritePrompt
-
-        val savedDefaultKeepFps = sharedPreferences.getBoolean("default_keep_fps", false)
-        _defaultKeepFps.value = savedDefaultKeepFps
-        _keepOriginalFps.value = savedDefaultKeepFps
+    fun clearTempFiles() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val context = getApplication<Application>()
+                com.example.slimvideo.utils.FileStorageManager.cleanTempFiles(context)
+            } catch (e: java.lang.Exception) {
+                Log.e("MainViewModel", "Error clearing cache", e)
+            }
+            calculateTempFilesSize()
+        }
     }
 
     fun setTheme(theme: AppTheme) {
@@ -151,9 +235,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setUseH265(value: Boolean) {
         _useH265.value = value
     }
-
-    private var currentWorkId: UUID? = null
-    private var tempOutputPath: String? = null
 
     /**
      * Resolves metadata of selected video URI.
@@ -207,390 +288,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 logDebug("[字段暴力转储] 发生错误: ${e.message}")
             }
 
-            val videoItem = withContext(Dispatchers.IO) {
-                try {
-                    val resolver: ContentResolver = context.contentResolver
-                    var displayName = "Unknown Video"
-                    var size = 0L
-
-                    // 1. ALWAYS query the basic columns using the original virtual Picker URI (uri) first, which is 100% safe and guaranteed to succeed!
-                    resolver.query(uri, null, null, null, null)?.use { cursor ->
-                        if (cursor.moveToFirst()) {
-                            val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                            if (nameIdx != -1) displayName = cursor.getString(nameIdx)
-                            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                            if (sizeIdx != -1) size = cursor.getLong(sizeIdx)
-                        }
-                    }
-                    logDebug("基础查询结果 - 名称: $displayName, 大小: $size 字节")
-
-                    // 2. ALWAYS query the advanced attributes using the original virtual Picker URI (uri) first using MediaMetadataRetriever, which is 100% safe!
-                    logDebug("启动 MediaMetadataRetriever 提取元数据...")
-                    val retriever = MediaMetadataRetriever()
-                    retriever.setDataSource(context, uri)
-                    
-                    val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-                    val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-                    var bitrate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull() ?: 0L
-                    
-                    retriever.release()
-                    logDebug("元数据解析完毕 - 时长: $durationMs ms, 宽: $width, 高: $height, 码率: $bitrate bps")
-
-                    // 2.1 Advanced metadata extraction using MediaExtractor
-                    var fps = 0.0
-                    var codec = "未知"
-                    var bitDepth = 8
-
-                    val extractor = android.media.MediaExtractor()
-                    try {
-                        extractor.setDataSource(context, uri, null)
-                        val trackCount = extractor.trackCount
-                        for (i in 0 until trackCount) {
-                            val format = extractor.getTrackFormat(i)
-                            val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
-                            if (mime.startsWith("video/")) {
-                                if (format.containsKey(android.media.MediaFormat.KEY_FRAME_RATE)) {
-                                    fps = try {
-                                        format.getFloat(android.media.MediaFormat.KEY_FRAME_RATE).toDouble()
-                                    } catch (e: Exception) {
-                                        format.getInteger(android.media.MediaFormat.KEY_FRAME_RATE).toDouble()
-                                    }
-                                }
-                                codec = when {
-                                    mime.contains("hevc") || mime.contains("h265") -> "H.265"
-                                    mime.contains("avc") || mime.contains("h264") -> "H.264"
-                                    mime.contains("vp9") -> "VP9"
-                                    mime.contains("vp8") -> "VP8"
-                                    mime.contains("av01") || mime.contains("av1") -> "AV1"
-                                    else -> mime.substringAfter("video/").uppercase()
-                                }
-                                if (format.containsKey(android.media.MediaFormat.KEY_PROFILE)) {
-                                    val profile = format.getInteger(android.media.MediaFormat.KEY_PROFILE)
-                                    if (mime.contains("hevc") && (profile == 2 || profile == 4096 || profile == 8192)) {
-                                        bitDepth = 10
-                                    } else if (mime.contains("avc") && profile == 2048) {
-                                        bitDepth = 10
-                                    } else if (mime.contains("vp9") && (profile == 4096 || profile == 8192)) {
-                                        bitDepth = 10
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logDebug("MediaExtractor 提取高级属性失败: ${e.message}")
-                    } finally {
-                        try {
-                            extractor.release()
-                        } catch (e: Exception) { /* ignore */ }
-                    }
-
-                    // Fallback FPS calculation
-                    if (fps <= 0.0) {
-                        try {
-                            val ret = MediaMetadataRetriever()
-                            ret.setDataSource(context, uri)
-                            val frameCount = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
-                            } else 0
-                            if (frameCount > 0 && durationMs > 0) {
-                                fps = frameCount.toDouble() / (durationMs / 1000.0)
-                            }
-                            ret.release()
-                        } catch (e: Exception) { /* ignore */ }
-                    }
-                    if (fps <= 0.0) fps = 30.0
-                    logDebug("高级属性提取完毕 - 帧率: $fps fps, 编码: $codec, 位深: $bitDepth bit")
-
-                    // If bitrate is missing, calcul                    // 3. Try to resolve the real physical path and real filename by mapping Picker/Document URI to standard MediaStore URI and applying multiple fallback strategies
-                    var absolutePath: String? = null
-                    var realDisplayName: String? = null
-
-                    // Strategy 1 (Direct Query): Try to query absolute path and display name from the original uri (works on legacy systems or direct providers)
-                    logDebug("【Strategy 1】启动：尝试直接查询原始 URI 的 DATA 字段...")
-                    try {
-                        val projection = arrayOf(MediaStore.Video.Media.DATA, OpenableColumns.DISPLAY_NAME)
-                        resolver.query(uri, projection, null, null, null)?.use { cursor ->
-                            if (cursor.moveToFirst()) {
-                                val pathIdx = cursor.getColumnIndex(MediaStore.Video.Media.DATA)
-                                if (pathIdx != -1) {
-                                    val p = cursor.getString(pathIdx)
-                                    if (!p.isNullOrEmpty()) {
-                                        if (!isVirtualPath(p)) {
-                                            absolutePath = p
-                                            logDebug("  -> Strategy 1 成功获取真实绝对路径: $absolutePath")
-                                        } else {
-                                            logDebug("  -> Strategy 1 拒绝获取的虚拟路径: $p")
-                                        }
-                                    }
-                                }
-                                val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                                if (nameIdx != -1) {
-                                    val n = cursor.getString(nameIdx)
-                                    if (!n.isNullOrEmpty()) {
-                                        if (!isVirtualName(n)) {
-                                            realDisplayName = n
-                                            logDebug("  -> Strategy 1 成功获取真实文件名: $realDisplayName")
-                                        } else {
-                                            logDebug("  -> Strategy 1 拒绝获取的虚拟文件名: $n")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logDebug("  -> Strategy 1 失败报错: ${e.message}")
-                    }
-
-                    // Strategy 2 (ID Mapping): If path/name is still unresolved, try to parse the ID from PhotoPicker or DocumentProvider URI and map to standard MediaStore URI
-                    if (absolutePath == null || realDisplayName == null) {
-                        logDebug("【Strategy 2】启动：尝试进行 Picker / DocumentProvider ID 拆解与标准 MediaStore 重组映射...")
-                        try {
-                            var documentId: String? = null
-                            if (android.provider.DocumentsContract.isDocumentUri(context, uri)) {
-                                documentId = android.provider.DocumentsContract.getDocumentId(uri)
-                                logDebug("  -> 检测到 Document URI, documentId: $documentId")
-                            }
-
-                            var parsedId: Long? = null
-                            if (documentId != null) {
-                                if (documentId.contains(":")) {
-                                    val parts = documentId.split(":")
-                                    val type = parts[0]
-                                    val idStr = parts[1]
-                                    logDebug("  -> 拆解 documentId 类型: $type, ID字符串: $idStr")
-                                    if (type.equals("video", ignoreCase = true) || type.equals("image", ignoreCase = true)) {
-                                        parsedId = idStr.toLongOrNull()
-                                    } else if (uri.authority?.contains("externalstorage") == true) {
-                                        if (type.equals("primary", ignoreCase = true)) {
-                                            val p = android.os.Environment.getExternalStorageDirectory().toString() + "/" + idStr
-                                            logDebug("  -> 外部存储提供者 primary 映射路径: $p")
-                                            if (java.io.File(p).exists()) {
-                                                if (!isVirtualPath(p)) {
-                                                    absolutePath = p
-                                                    logDebug("  -> Strategy 2 路径有效并采纳: $absolutePath")
-                                                } else {
-                                                    logDebug("  -> Strategy 2 拒绝虚拟路径: $p")
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    parsedId = documentId.toLongOrNull()
-                                }
-                            } else {
-                                parsedId = try {
-                                    android.content.ContentUris.parseId(uri)
-                                } catch (e: Exception) {
-                                    uri.lastPathSegment?.toLongOrNull()
-                                }
-                            }
-
-                            logDebug("  -> 解析出的 MediaStore ID: $parsedId")
-                            if (parsedId != null) {
-                                val targetUri = android.content.ContentUris.withAppendedId(
-                                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI, 
-                                    parsedId
-                                )
-                                logDebug("  -> 重组后的目标 MediaStore URI: $targetUri")
-
-                                resolver.query(
-                                    targetUri, 
-                                    arrayOf(MediaStore.Video.Media.DATA, MediaStore.Video.Media.DISPLAY_NAME), 
-                                    null, 
-                                    null, 
-                                    null
-                                )?.use { cursor ->
-                                    if (cursor.moveToFirst()) {
-                                        if (absolutePath == null) {
-                                            val pathIdx = cursor.getColumnIndex(MediaStore.Video.Media.DATA)
-                                            if (pathIdx != -1) {
-                                                val p = cursor.getString(pathIdx)
-                                                if (!p.isNullOrEmpty()) {
-                                                    if (!isVirtualPath(p)) {
-                                                        absolutePath = p
-                                                        logDebug("  -> Strategy 2 成功获取真实绝对路径: $absolutePath")
-                                                    } else {
-                                                        logDebug("  -> Strategy 2 拒绝虚拟绝对路径: $p")
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if (realDisplayName == null) {
-                                            val nameIdx = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
-                                            if (nameIdx != -1) {
-                                                val n = cursor.getString(nameIdx)
-                                                if (!n.isNullOrEmpty()) {
-                                                    if (!isVirtualName(n)) {
-                                                        realDisplayName = n
-                                                        logDebug("  -> Strategy 2 成功获取真实文件名: $realDisplayName")
-                                                    } else {
-                                                        logDebug("  -> Strategy 2 拒绝虚拟文件名: $n")
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            logDebug("  -> Strategy 2 失败报错: ${e.message}")
-                        }
-                    }
-
-                    // Strategy 3 (Dynamic Fingerprinting Search - Ultimate Fallback):
-                    // Query MediaStore for videos matching the exact size, then verify via duration, width, height
-                    if (absolutePath == null && size > 0) {
-                        logDebug("【Strategy 3】启动：启动智能特征指纹 MediaStore 全盘搜寻兜底...")
-                        try {
-                            val selection = "${MediaStore.Video.Media.SIZE} = ?"
-                            val selectionArgs = arrayOf(size.toString())
-                            val projection = arrayOf(
-                                MediaStore.Video.Media.DATA,
-                                MediaStore.Video.Media.DISPLAY_NAME,
-                                MediaStore.Video.Media.DURATION,
-                                MediaStore.Video.Media.WIDTH,
-                                MediaStore.Video.Media.HEIGHT
-                            )
-
-                            logDebug("  -> 开始在本地 MediaStore 中检索 size = $size 字节 的记录...")
-                            resolver.query(
-                                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                                projection,
-                                selection,
-                                selectionArgs,
-                                null
-                            )?.use { cursor ->
-                                var bestMatchPath: String? = null
-                                var bestMatchName: String? = null
-                                var matchScore = 0
-                                var candidateCount = 0
-
-                                while (cursor.moveToNext()) {
-                                    val p = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA))
-                                    val name = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME))
-                                    val dur = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION))
-                                    val w = cursor.getInt(cursor.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH))
-                                    val h = cursor.getInt(cursor.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT))
-
-                                    // Check if candidate path is virtual itself
-                                    if (isVirtualPath(p)) {
-                                        logDebug("  [候选者(被剔除)] 路径: $p (检测为虚拟路径)")
-                                        continue
-                                    }
-
-                                    candidateCount++
-                                    logDebug("  [候选者 #$candidateCount] 路径: $p, 名字: $name, 时长: $dur, 宽: $w, 高: $h")
-
-                                    var score = 1 // Exact size matched perfectly
-                                    if (durationMs > 0 && Math.abs(dur - durationMs) < 2000) {
-                                        score += 2 // Duration matched within 2 seconds
-                                    }
-                                    if (width > 0 && w == width) {
-                                        score += 1 // Width matched
-                                    }
-                                    if (height > 0 && h == height) {
-                                        score += 1 // Height matched
-                                    }
-
-                                    logDebug("  [候选者 #$candidateCount] 指纹匹配得分: $score")
-                                    if (score > matchScore) {
-                                        matchScore = score
-                                        bestMatchPath = p
-                                        bestMatchName = name
-                                    }
-                                }
-
-                                logDebug("  -> 检索完毕。共评估有效候选文件数: $candidateCount，最高得分: $matchScore")
-                                if (matchScore >= 2 && !bestMatchPath.isNullOrEmpty()) {
-                                    absolutePath = bestMatchPath
-                                    if (realDisplayName == null && !bestMatchName.isNullOrEmpty() && !bestMatchName.all { it.isDigit() }) {
-                                        realDisplayName = bestMatchName
-                                    }
-                                    logDebug("  -> Strategy 3 成功还原真实路径: $absolutePath, 文件名: $realDisplayName")
-                                } else {
-                                    logDebug("  -> 未能找到得分足够高的真实匹配文件。")
-                                }
-                            }
-                        } catch (e: Exception) {
-                            logDebug("  -> Strategy 3 失败报错: ${e.message}")
-                        }
-                    }
-
-                    // Apply final display name
-                    if (!realDisplayName.isNullOrEmpty()) {
-                        displayName = realDisplayName!!
-                    }
-
-                    // Extract file date using robust fallback-driven timestamp query
-                    var fileTimestamp = 0L
-                    
-                    // 1. Try absolutePath first
-                    if (!absolutePath.isNullOrEmpty()) {
-                        try {
-                            val file = java.io.File(absolutePath!!)
-                            if (file.exists()) {
-                                fileTimestamp = file.lastModified()
-                                logDebug("文件日期提取 - 通过绝对路径提取成功: $fileTimestamp")
-                            }
-                        } catch (e: Exception) {
-                            logDebug("文件日期提取 - 绝对路径读取异常: ${e.message}")
-                        }
-                    }
-                    
-                    // 2. Fallback to MediaStore query using standard MediaStore columns
-                    if (fileTimestamp <= 0L) {
-                        try {
-                            val projection = arrayOf(MediaStore.Video.Media.DATE_MODIFIED)
-                            resolver.query(uri, projection, null, null, null)?.use { cursor ->
-                                if (cursor.moveToFirst()) {
-                                    val dateIdx = cursor.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
-                                    if (dateIdx != -1) {
-                                        // DATE_MODIFIED is in seconds, convert to milliseconds
-                                        fileTimestamp = cursor.getLong(dateIdx) * 1000L
-                                        logDebug("文件日期提取 - 通过 MediaStore DATE_MODIFIED 提取成功: $fileTimestamp")
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            logDebug("文件日期提取 - MediaStore 读取异常: ${e.message}")
-                        }
-                    }
-                    
-                    // 3. Fallback to current system time
-                    if (fileTimestamp <= 0L) {
-                        fileTimestamp = System.currentTimeMillis()
-                        logDebug("文件日期提取 - 采用当前系统时间兜底: $fileTimestamp")
-                    }
-                    
-                    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
-                    val fileDate = sdf.format(java.util.Date(fileTimestamp))
-
-                    logDebug("==== 诊断解析完毕 ====")
-                    logDebug("决议路径 (Path): ${absolutePath ?: "【未能获取真实路径，回退 to 虚拟路径】"}")
-                    logDebug("决议名称 (Name): $displayName")
-                    logDebug("决议日期 (Date): $fileDate")
-
-                    VideoItem(
-                        uri = uri, // Keep original Picker URI for WorkManager permission compatibility!
-                        displayName = displayName,
-                        size = size,
-                        durationMs = durationMs,
-                        width = width,
-                        height = height,
-                        bitrate = bitrate,
-                        path = absolutePath,
-                        fps = fps,
-                        codec = codec,
-                        bitDepth = bitDepth,
-                        fileDate = fileDate
-                    )
-                } catch (e: Exception) {
-                    logDebug("诊断解析捕获严重异常: ${e.message}")
-                    Log.e("MainViewModel", "Error analyzing video metadata", e)
-                    null
-                }
-            }
+            val videoItem = com.example.slimvideo.utils.VideoMetadataResolver.resolveVideoItem(context, uri) { logDebug(it) }
 
             if (videoItem != null) {
                 _selectedVideo.value = videoItem
@@ -625,10 +323,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val preset = _selectedPreset.value ?: return
 
         _compressionProgress.value = 0
+        _compressionStatusText.value = "正在初始化转码..."
         _compressionState.value = CompressionState.Compressing
+
+        lastLoggedStep = ""
+        lastLoggedProgressMilestone = -1
+        val originalSizeMb = video.size.toDouble() / (1024 * 1024)
+        val sizeStr = String.format(java.util.Locale.US, "%.2f", originalSizeMb)
+        logDebug("=== 启动硬件加速转码任务 ===")
+        logDebug("输入视频: ${video.displayName} (${video.width}x${video.height}, ${video.fps} fps, $sizeStr MB)")
+        logDebug("目标配置: 档位: ${preset.name} | H.265编码: ${_useH265.value} | 保持原始帧率: ${_keepOriginalFps.value}")
 
         val inputData = Data.Builder()
             .putString(VideoCompressionWorker.KEY_VIDEO_URI, video.uri.toString())
+            .putString(VideoCompressionWorker.KEY_RESOLVED_PATH, video.path)
             .putString(VideoCompressionWorker.KEY_PRESET_ID, preset.id)
             .putBoolean(VideoCompressionWorker.KEY_USE_H265, _useH265.value)
             .putBoolean(VideoCompressionWorker.KEY_KEEP_ORIGINAL_FPS, _keepOriginalFps.value)
@@ -639,40 +347,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .build()
 
         currentWorkId = compressionWork.id
+        
+        // Save state immediately to handle app kills during transcode
+        saveActiveTaskState(video, null)
+        sharedPreferences.edit().putString("active_work_id", compressionWork.id.toString()).apply()
+
         val workManager = WorkManager.getInstance(context)
         workManager.enqueue(compressionWork)
 
-        // Observe progress & state
+        observeWorkById(compressionWork.id)
+    }
+
+    private fun observeWorkById(workId: UUID) {
+        val workManager = WorkManager.getInstance(getApplication())
         viewModelScope.launch {
-            workManager.getWorkInfoByIdFlow(compressionWork.id).collect { workInfo ->
+            workManager.getWorkInfoByIdFlow(workId).collect { workInfo ->
                 if (workInfo != null) {
                     when (workInfo.state) {
                         WorkInfo.State.RUNNING -> {
                             val progress = workInfo.progress.getInt(VideoCompressionWorker.KEY_PROGRESS, 0)
                             _compressionProgress.value = progress
+                            val statusText = workInfo.progress.getString(VideoCompressionWorker.KEY_STATUS_TEXT)
+                            if (!statusText.isNullOrEmpty()) {
+                                _compressionStatusText.value = statusText
+                                if (statusText != lastLoggedStep) {
+                                    lastLoggedStep = statusText
+                                    logDebug("执行状态变更 ➜ $statusText")
+                                }
+                            }
+                            _compressionState.value = CompressionState.Compressing
                         }
                         WorkInfo.State.SUCCEEDED -> {
                             val path = workInfo.outputData.getString(VideoCompressionWorker.KEY_OUTPUT_PATH)
                             tempOutputPath = path
+                            logDebug("=== 转码任务成功完成 ===")
                             if (path != null) {
                                 val file = File(path)
                                 if (file.exists()) {
                                     _compressedVideoSize.value = file.length()
+                                    val compSizeMb = file.length().toDouble() / (1024 * 1024)
+                                    val compSizeStr = String.format(java.util.Locale.US, "%.2f", compSizeMb)
+                                    logDebug("输出文件路径: $path ($compSizeStr MB)")
                                 }
+                                
+                                // Update saved state with tempOutputPath
+                                _selectedVideo.value?.let { video ->
+                                    saveActiveTaskState(video, path)
+                                }
+
                                 if (_shouldPromptOverwrite.value) {
                                     _compressionState.value = CompressionState.AwaitingOverwriteConfirmation
                                 } else {
-                                    // Bypass the app's custom dialog and request system overwrite deletion directly!
                                     _compressionState.value = CompressionState.Replacing
                                     requestDeleteOriginal(getApplication())
                                 }
                             } else {
+                                logDebug("警告: 转码完成但输出路径为空")
                                 _compressionState.value = CompressionState.Failed("转码完成，但未找到临时输出文件。")
+                                clearActiveTaskState()
                             }
                         }
                         WorkInfo.State.FAILED -> {
                             val errMsg = workInfo.outputData.getString(VideoCompressionWorker.KEY_ERROR_MSG) ?: "未知硬件加速错误"
+                            logDebug("=== 转码任务失败 ===")
+                            logDebug("错误信息: $errMsg")
                             _compressionState.value = CompressionState.Failed("视频压缩失败: $errMsg")
+                            clearActiveTaskState()
                         }
                         else -> {}
                     }
@@ -778,170 +518,84 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _compressionState.value = CompressionState.Replacing
 
         viewModelScope.launch(Dispatchers.IO) {
-            val originalPath = video.path
-            val tempFile = File(tempPath)
-
-            if (!tempFile.exists()) {
-                _compressionState.value = CompressionState.Failed("找不到转码完成的压缩临时文件。")
-                return@launch
-            }
-
-            var success = false
-            var errorMsg = "未知错误"
-
-            // Pre-extract target video details from local tempFile before any branch operations
-            var finalSize = tempFile.length()
-            var finalWidth = 0
-            var finalHeight = 0
-            var finalFps = 30.0
-            var finalCodec = "未知"
-
-            val ret = MediaMetadataRetriever()
-            try {
-                ret.setDataSource(tempFile.absolutePath)
-                finalWidth = ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-                finalHeight = ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    val frameCount = ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
-                    val durationMs = ret.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    if (frameCount > 0 && durationMs > 0) {
-                        finalFps = frameCount.toDouble() / (durationMs / 1000.0)
+            val result = com.example.slimvideo.utils.FileStorageManager.replaceOriginalVideo(context, video, tempPath) { logDebug(it) }
+            
+            withContext(Dispatchers.Main) {
+                when (result) {
+                    is com.example.slimvideo.utils.ReplaceResult.Success -> {
+                        _compressionState.value = CompressionState.Completed(
+                            savedPath = result.savedPath,
+                            originalSize = video.size,
+                            size = result.size,
+                            width = result.width,
+                            height = result.height,
+                            fps = result.fps,
+                            codec = result.codec
+                        )
+                        clearActiveTaskState()
                     }
-                }
-            } catch (e: Exception) {
-                Log.e("MainViewModel", "Pre-retrieving output details failed", e)
-            } finally {
-                try { ret.release() } catch (e: Exception) {}
-            }
-
-            val ext = android.media.MediaExtractor()
-            try {
-                ext.setDataSource(tempFile.absolutePath)
-                for (i in 0 until ext.trackCount) {
-                    val format = ext.getTrackFormat(i)
-                    val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
-                    if (mime.startsWith("video/")) {
-                        finalCodec = when {
-                            mime.contains("hevc") || mime.contains("h265") -> "H.265"
-                            mime.contains("avc") || mime.contains("h264") -> "H.264"
-                            mime.contains("vp9") -> "VP9"
-                            else -> mime.substringAfter("video/").uppercase()
-                        }
-                        if (format.containsKey(android.media.MediaFormat.KEY_FRAME_RATE)) {
-                            finalFps = try {
-                                format.getFloat(android.media.MediaFormat.KEY_FRAME_RATE).toDouble()
-                            } catch (e: Exception) {
-                                format.getInteger(android.media.MediaFormat.KEY_FRAME_RATE).toDouble()
-                            }
-                        }
-                        break
+                    is com.example.slimvideo.utils.ReplaceResult.Failure -> {
+                        _compressionState.value = CompressionState.Failed(result.error)
                     }
-                }
-            } catch (e: Exception) {
-                Log.e("MainViewModel", "Pre-extracting output details failed", e)
-            } finally {
-                try { ext.release() } catch (e: Exception) {}
-            }
-
-            // Try 1: Atomic File Path Rename if the app has direct write access (highly compatible on legacy/legacy storage configs)
-            if (originalPath != null) {
-                try {
-                    val originalFile = File(originalPath)
-                    
-                    // Copy file channel content to destination
-                    FileInputStream(tempFile).use { input ->
-                        FileOutputStream(originalFile).use { output ->
-                            input.channel.transferTo(0, input.channel.size(), output.channel)
-                        }
-                    }
-                    success = true
-                    tempFile.delete()
-                    Log.i("MainViewModel", "File replaced successfully via direct channel copy.")
-                } catch (e: Exception) {
-                    errorMsg = "物理路径直写失败: ${e.localizedMessage ?: e.message}"
-                    Log.w("MainViewModel", "Direct copy failed, falling back to MediaStore insert: ${e.message}")
-                }
-            }
-
-            // Try 2: If direct writing to physical storage fails under strict Android 11+ scoped storage, we write via MediaStore
-            if (!success) {
-                try {
-                    val resolver = context.contentResolver
-                    val finalDisplayName = if (video.displayName.endsWith(".mp4", ignoreCase = true)) {
-                        video.displayName
-                    } else {
-                        "${video.displayName}.mp4"
-                    }
-                    val contentValues = android.content.ContentValues().apply {
-                        put(MediaStore.Video.Media.DISPLAY_NAME, finalDisplayName)
-                        put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && originalPath != null) {
-                            val relativePath = try {
-                                val upperPath = originalPath.uppercase()
-                                val folders = listOf("DCIM", "MOVIES", "PICTURES", "DOWNLOAD", "DOCUMENTS")
-                                var parsedPath = ""
-                                for (folder in folders) {
-                                    val index = upperPath.indexOf("/$folder/")
-                                    if (index != -1) {
-                                        val subPath = originalPath.substring(index + 1) // e.g. "DCIM/Camera/video.mp4"
-                                        val dir = subPath.substringBeforeLast("/") // e.g. "DCIM/Camera"
-                                        parsedPath = if (dir.endsWith("/")) dir else "$dir/"
-                                        break
-                                    }
-                                }
-                                if (parsedPath.isNotEmpty()) parsedPath else "Movies/"
-                            } catch (e: Exception) {
-                                "Movies/"
-                            }
-                            put(MediaStore.Video.Media.RELATIVE_PATH, relativePath)
-                        }
-                    }
-
-                    val newUri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
-                    if (newUri != null) {
-                        resolver.openOutputStream(newUri)?.use { output ->
-                            FileInputStream(tempFile).use { input ->
-                                input.copyTo(output)
-                            }
-                        }
-                        tempFile.delete()
-                        success = true
-                        Log.i("MainViewModel", "File saved successfully via MediaStore insertion.")
-                    } else {
-                        errorMsg = "MediaStore插入返回Uri为空"
-                    }
-                } catch (e: Exception) {
-                    errorMsg = "MediaStore写入捕获异常: ${e.localizedMessage ?: e.message}"
-                    Log.e("MainViewModel", "MediaStore write failed", e)
-                }
-            }
-
-            if (success) {
-                // Force media scanner re-index to refresh gallery correctly
-                val pathsToScan = if (originalPath != null) arrayOf(originalPath) else arrayOf()
-                MediaScannerConnection.scanFile(context, pathsToScan, arrayOf("video/mp4")) { path, uri ->
-                    Log.i("MainViewModel", "MediaScanner refresh completed for: $path -> $uri")
-                }
-                
-                withContext(Dispatchers.Main) {
-                    _compressionState.value = CompressionState.Completed(
-                        savedPath = originalPath ?: video.displayName,
-                        originalSize = video.size,
-                        size = finalSize,
-                        width = finalWidth,
-                        height = finalHeight,
-                        fps = finalFps,
-                        codec = finalCodec
-                    )
-                    _selectedVideo.value = null
-                    _selectedPreset.value = null
-                }
-            } else {
-                withContext(Dispatchers.Main) {
-                    _compressionState.value = CompressionState.Failed("写入并覆盖压缩视频失败 ($errorMsg)")
                 }
             }
         }
+    }
+
+    private fun saveActiveTaskState(video: VideoItem?, tempPath: String?) {
+        val editor = sharedPreferences.edit()
+        if (video != null) {
+            editor.putString("active_video_uri", video.uri.toString())
+            editor.putString("active_video_name", video.displayName)
+            editor.putLong("active_video_size", video.size)
+            editor.putLong("active_video_duration", video.durationMs)
+            editor.putInt("active_video_width", video.width)
+            editor.putInt("active_video_height", video.height)
+            editor.putLong("active_video_bitrate", video.bitrate)
+            editor.putString("active_video_path", video.path)
+            editor.putFloat("active_video_fps", video.fps.toFloat())
+            editor.putString("active_video_codec", video.codec)
+            editor.putInt("active_video_bitdepth", video.bitDepth)
+            editor.putString("active_video_filedate", video.fileDate)
+            editor.putString("active_temp_output_path", tempPath)
+            editor.putBoolean("active_task_exists", true)
+        } else {
+            editor.remove("active_video_uri")
+            editor.remove("active_video_name")
+            editor.remove("active_video_size")
+            editor.remove("active_video_duration")
+            editor.remove("active_video_width")
+            editor.remove("active_video_height")
+            editor.remove("active_video_bitrate")
+            editor.remove("active_video_path")
+            editor.remove("active_video_fps")
+            editor.remove("active_video_codec")
+            editor.remove("active_temp_output_path")
+            editor.putBoolean("active_task_exists", false)
+        }
+        editor.apply()
+    }
+
+    private fun clearActiveTaskState() {
+        saveActiveTaskState(null, null)
+        sharedPreferences.edit().remove("active_work_id").apply()
+        currentWorkId = null
+    }
+
+    fun cancelCompression() {
+        val workId = currentWorkId
+        if (workId != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val workManager = WorkManager.getInstance(getApplication())
+                    workManager.cancelWorkById(workId)
+                    Log.i("MainViewModel", "Cancelled WorkManager job: $workId")
+                } catch (e: Exception) {
+                    Log.e("MainViewModel", "Error cancelling work", e)
+                }
+            }
+        }
+        resetState()
     }
 
     fun resetState() {
@@ -950,5 +604,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _selectedPreset.value = null
         _useH265.value = true
         _compressionProgress.value = 0
+        tempOutputPath?.let { path ->
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val file = File(path)
+                    if (file.exists()) {
+                        file.delete()
+                        Log.i("MainViewModel", "Cleaned up temporary file: $path")
+                    }
+                } catch (e: Exception) {
+                    Log.e("MainViewModel", "Failed to clean up temp file: ${e.message}")
+                }
+            }
+            tempOutputPath = null
+        }
+        clearActiveTaskState()
     }
 }

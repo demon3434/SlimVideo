@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.slimvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -67,9 +67,9 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.0")
     
     // Media3 Transformer, Effect & Common
-    implementation("androidx.media3:media3-transformer:1.3.1")
-    implementation("androidx.media3:media3-effect:1.3.1")
-    implementation("androidx.media3:media3-common:1.3.1")
+    implementation("androidx.media3:media3-transformer:1.4.1")
+    implementation("androidx.media3:media3-effect:1.4.1")
+    implementation("androidx.media3:media3-common:1.4.1")
     
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
