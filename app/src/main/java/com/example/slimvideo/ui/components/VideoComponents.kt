@@ -134,7 +134,8 @@ fun ImportBox(onClick: () -> Unit, isAnalyzing: Boolean, theme: AppTheme) {
 fun VideoMetadataCard(video: VideoItem, theme: AppTheme, onSelectAnother: () -> Unit) {
     val durationSec = video.durationMs / 1000
     val durationText = String.format(Locale.getDefault(), "%02d:%02d", durationSec / 60, durationSec % 60)
-    val sizeMb = video.size.toDouble() / (1024 * 1024)
+    // val sizeMb = video.size.toDouble() / (1024 * 1024) // 旧二进制标准
+    val sizeMb = video.size.toDouble() / (1000 * 1000) // 改用十进制标准 (SI)，与手机相册保持一致
     val sizeText = String.format(Locale.getDefault(), "%.1f MB", sizeMb)
     val bitrateText = String.format(Locale.getDefault(), "%.1f Mbps", video.bitrate.toDouble() / 1_000_000)
 
@@ -292,7 +293,8 @@ fun PresetSelectionGrid(
                         if (eligible) {
                             val durationSec = video.durationMs / 1000
                             val estSize = preset.estimateSizeMb(durationSec, useH265)
-                            val originalSizeMb = video.size.toDouble() / (1024 * 1024)
+                            // val originalSizeMb = video.size.toDouble() / (1024 * 1024) // 旧二进制标准
+                            val originalSizeMb = video.size.toDouble() / (1000 * 1000) // 改用十进制标准 (SI)
                             val savingsPercent = ((originalSizeMb - estSize) / originalSizeMb * 100).coerceAtLeast(0.0)
 
                             Text(
@@ -482,8 +484,10 @@ fun ActionSection(
         }
         is CompressionState.Completed -> {
             val savedPath = state.savedPath
-            val origSizeMb = state.originalSize.toDouble() / (1024 * 1024)
-            val newSizeMb = state.size.toDouble() / (1024 * 1024)
+            // val origSizeMb = state.originalSize.toDouble() / (1024 * 1024) // 旧二进制标准
+            // val newSizeMb = state.size.toDouble() / (1024 * 1024) // 旧二进制标准
+            val origSizeMb = state.originalSize.toDouble() / (1000 * 1000) // 改用十进制标准 (SI)
+            val newSizeMb = state.size.toDouble() / (1000 * 1000) // 改用十进制标准 (SI)
             val savedSizeMb = origSizeMb - newSizeMb
             
             val origSizeText = String.format(Locale.getDefault(), "%.1f MB", origSizeMb)

@@ -45,3 +45,10 @@ captures/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# OpenSpec & Node
+openspec/
+.agent/
+node_modules/
+package.json
+package-lock.json

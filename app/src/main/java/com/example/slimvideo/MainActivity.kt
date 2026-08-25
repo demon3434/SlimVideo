@@ -316,8 +316,10 @@ fun SlimVideoMainScreen(viewModel: MainViewModel = androidx.lifecycle.viewmodel.
 
             if (state is CompressionState.AwaitingOverwriteConfirmation) {
                 val compressedSize by viewModel.compressedVideoSize.collectAsState()
-                val originalSizeMb = video?.size?.toDouble()?.div(1024 * 1024) ?: 0.0
-                val compressedSizeMb = compressedSize.toDouble() / (1024 * 1024)
+                // val originalSizeMb = video?.size?.toDouble()?.div(1024 * 1024) ?: 0.0 // 旧二进制标准
+                // val compressedSizeMb = compressedSize.toDouble() / (1024 * 1024) // 旧二进制标准
+                val originalSizeMb = video?.size?.toDouble()?.div(1000 * 1000) ?: 0.0 // 改用十进制标准 (SI)
+                val compressedSizeMb = compressedSize.toDouble() / (1000 * 1000) // 改用十进制标准 (SI)
                 val savingsPercent = ((originalSizeMb - compressedSizeMb) / originalSizeMb * 100).coerceAtLeast(0.0)
 
                 AlertDialog(

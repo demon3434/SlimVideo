@@ -327,8 +327,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _compressionState.value = CompressionState.Compressing
 
         lastLoggedStep = ""
-        lastLoggedProgressMilestone = -1
-        val originalSizeMb = video.size.toDouble() / (1024 * 1024)
+        // val originalSizeMb = video.size.toDouble() / (1024 * 1024) // 旧二进制标准
+        val originalSizeMb = video.size.toDouble() / (1000 * 1000) // 改用十进制标准 (SI)
         val sizeStr = String.format(java.util.Locale.US, "%.2f", originalSizeMb)
         logDebug("=== 启动硬件加速转码任务 ===")
         logDebug("输入视频: ${video.displayName} (${video.width}x${video.height}, ${video.fps} fps, $sizeStr MB)")
@@ -385,7 +385,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 val file = File(path)
                                 if (file.exists()) {
                                     _compressedVideoSize.value = file.length()
-                                    val compSizeMb = file.length().toDouble() / (1024 * 1024)
+                                    // val compSizeMb = file.length().toDouble() / (1024 * 1024) // 旧二进制标准
+                                    val compSizeMb = file.length().toDouble() / (1000 * 1000) // 改用十进制标准 (SI)
                                     val compSizeStr = String.format(java.util.Locale.US, "%.2f", compSizeMb)
                                     logDebug("输出文件路径: $path ($compSizeStr MB)")
                                 }

@@ -271,9 +271,15 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            val tempSizeMb = tempFilesSize.toDouble() / (1024 * 1024)
-                            val sizeText = if (tempSizeMb > 1024.0) {
-                                String.format(java.util.Locale.getDefault(), "%.2f GB", tempSizeMb / 1024.0)
+                            // val tempSizeMb = tempFilesSize.toDouble() / (1024 * 1024) // 旧二进制标准
+                            // val sizeText = if (tempSizeMb > 1024.0) {
+                            //     String.format(java.util.Locale.getDefault(), "%.2f GB", tempSizeMb / 1024.0)
+                            // } else {
+                            //     String.format(java.util.Locale.getDefault(), "%.1f MB", tempSizeMb)
+                            // }
+                            val tempSizeMb = tempFilesSize.toDouble() / (1000 * 1000) // 改用十进制标准 (SI)
+                            val sizeText = if (tempSizeMb > 1000.0) {
+                                String.format(java.util.Locale.getDefault(), "%.2f GB", tempSizeMb / 1000.0)
                             } else {
                                 String.format(java.util.Locale.getDefault(), "%.1f MB", tempSizeMb)
                             }
